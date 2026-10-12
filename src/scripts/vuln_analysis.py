@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from .recon import ReconAgent
@@ -8,7 +8,7 @@ from .recon import ReconAgent
 logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
-DEFAULT_MODEL_NAME = "qwen3.5:9b"
+DEFAULT_MODEL_NAME = "qwen3.5:0.8b"
 
 
 class VulnAnalysisAgent:
@@ -25,11 +25,26 @@ class VulnAnalysisAgent:
         ollama_url: str = DEFAULT_OLLAMA_URL,
         model_name: str = DEFAULT_MODEL_NAME,
         keep_alive: int = -1,
+        think: bool = False,
+        on_token: Optional[Callable[[str, bool], None]] = None,
+        on_log: Optional[Callable[[str], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ):
         self.recon_agent = recon_agent
         self.ollama_url = ollama_url
         self.model_name = model_name
         self.keep_alive = keep_alive
+        self.think = think
+        self.on_token = on_token
+        self.on_log = on_log
+        self.should_stop = should_stop
+
+    def _log(self, msg: str) -> None:
+        if self.on_log:
+            try:
+                self.on_log(msg)
+            except Exception:
+                pass
 
     def _query_ollama(
         self,
@@ -37,14 +52,18 @@ class VulnAnalysisAgent:
         system_prompt: str,
         stream: bool = True,
         show_thinking: bool = True,
+        think: Optional[bool] = None,
         timeout: int = 180,
+        token_callback: Optional[Callable[[str, bool], None]] = None,
     ) -> str:
         """Helper to invoke local LLM with keep_alive enabled to prevent reload overhead."""
+        use_think = self.think if think is None else think
         payload = {
             "model": self.model_name,
             "system": system_prompt,
             "prompt": prompt,
             "stream": stream,
+            "think": use_think,
             "keep_alive": self.keep_alive,
         }
 
@@ -54,11 +73,15 @@ class VulnAnalysisAgent:
             if response.status_code != 200:
                 err_msg = f"[-] Error: Ollama returned status {response.status_code}: {response.text}"
                 print(f"\n{err_msg}")
+                self._log(err_msg)
                 return err_msg
 
             if stream:
                 in_thinking = False
                 for line in response.iter_lines():
+                    if self.should_stop and self.should_stop():
+                        response.close()
+                        break
                     if line:
                         decoded = line.decode("utf-8")
                         try:
@@ -67,6 +90,12 @@ class VulnAnalysisAgent:
                             token = chunk.get("response", "")
 
                             if thinking_token:
+                                cb = token_callback or self.on_token
+                                if cb:
+                                    try:
+                                        cb(thinking_token, True)
+                                    except Exception:
+                                        pass
                                 if show_thinking:
                                     if not in_thinking:
                                         print("\n[Thinking] ", end="", flush=True)
@@ -76,6 +105,12 @@ class VulnAnalysisAgent:
                                     print(".", end="", flush=True)
 
                             if token:
+                                cb = token_callback or self.on_token
+                                if cb:
+                                    try:
+                                        cb(token, False)
+                                    except Exception:
+                                        pass
                                 if in_thinking:
                                     print("\n\n[Analysis Output]\n", flush=True)
                                     in_thinking = False
@@ -93,10 +128,12 @@ class VulnAnalysisAgent:
         except requests.exceptions.ConnectionError:
             err = f"[-] Could not connect to Ollama at {self.ollama_url}. Ensure Ollama is running."
             print(err)
+            self._log(err)
             return err
         except Exception as exc:
             err = f"[-] Error querying LLM: {str(exc)}"
             print(err)
+            self._log(err)
             return err
 
     def decide_follow_up_probes(self, initial_findings: List[Dict[str, Any]]) -> List[str]:
@@ -110,9 +147,9 @@ class VulnAnalysisAgent:
 
         prompt = f"Initial Findings:\n{json.dumps(initial_findings, indent=2)}\n\nEndpoints to probe further:"
         
-        # Stream to avoid blocking timeouts on thinking models
-        print("    [Thinking...] ", end="", flush=True)
-        res = self._query_ollama(prompt, system_prompt, stream=True, show_thinking=False, timeout=180)
+        # Stream with think=False for fast JSON decision
+        print("    [Querying...] ", end="", flush=True)
+        res = self._query_ollama(prompt, system_prompt, stream=True, show_thinking=False, think=False, timeout=180)
         print()  # newline after streaming completes
         
         import re
@@ -190,6 +227,8 @@ class VulnAnalysisAgent:
             f"{json.dumps(analysis_context, indent=2)}"
         )
 
-        print(f"\n[*] Stage 2: Consulting {self.model_name} for Vulnerability Analysis...\n")
+        msg = f"[*] Stage 2: Consulting {self.model_name} for Vulnerability Analysis..."
+        print(f"\n{msg}\n")
+        self._log(msg)
         return self._query_ollama(prompt, system_prompt, stream=True, show_thinking=True, timeout=240)
 

@@ -15,8 +15,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="qwen3.5:9b",
-        help="Ollama model to use (default: qwen3.5:9b)",
+        default="qwen3.5:0.8b",
+        help="Ollama model to use (default: qwen3.5:0.8b)",
     )
     parser.add_argument(
         "--ollama-url",
@@ -28,7 +28,38 @@ def main() -> None:
         action="store_true",
         help="Enable Stage 1 Playwright headless browser crawling & interception",
     )
+    parser.add_argument(
+        "--think",
+        action="store_true",
+        help="Enable deep chain-of-thought reasoning (slower, disabled by default for speed)",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch the interactive Web GUI wrapper in your browser",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host address for Web GUI (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5050,
+        help="Port to run Web GUI on (default: 5050)",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not auto-open web browser when launching Web GUI",
+    )
     args = parser.parse_args()
+
+    if args.gui:
+        from .web import run_web_gui
+        run_web_gui(host=args.host, port=args.port, open_browser=not args.no_browser)
+        return
 
     print("=" * 60)
     print(" John White: Automated Pentesting Bot")
@@ -64,6 +95,7 @@ def main() -> None:
         ollama_url=args.ollama_url,
         model_name=args.model,
         keep_alive=-1,  # Keeps model pinned in memory across runs
+        think=args.think,
     )
 
     # Interactive Stage 2 -> Stage 1 Querying:

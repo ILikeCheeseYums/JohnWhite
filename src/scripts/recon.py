@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -22,14 +22,14 @@ class ReconAgent:
         self.discovered_endpoints: List[str] = []
         self.intercepted_traffic: List[Dict[str, Any]] = []
 
-    def probe_endpoint(self, endpoint: str) -> Dict[str, Any]:
+    def probe_endpoint(self, endpoint: str, timeout: int = 5) -> Dict[str, Any]:
         """Probes a specific endpoint and returns response metadata."""
         if not endpoint.startswith("/"):
             endpoint = f"/{endpoint}"
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.session.get(url, timeout=5)
+            response = self.session.get(url, timeout=timeout)
             content_type = response.headers.get("Content-Type", "")
 
             result = {
@@ -55,7 +55,12 @@ class ReconAgent:
         except Exception as exc:
             return {"endpoint": endpoint, "error": str(exc)}
 
-    def quick_scan(self, custom_paths: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def quick_scan(
+        self,
+        custom_paths: Optional[List[str]] = None,
+        on_probe: Optional[Callable[[Dict[str, Any]], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> List[Dict[str, Any]]:
         """Scans standard reconnaissance paths or a custom path list."""
         paths = custom_paths or [
             "/",
@@ -70,12 +75,23 @@ class ReconAgent:
 
         findings = []
         for path in paths:
+            if should_stop and should_stop():
+                break
             res = self.probe_endpoint(path)
             findings.append(res)
+            if on_probe:
+                try:
+                    on_probe(res)
+                except Exception:
+                    pass
         return findings
 
     def browser_crawl_and_intercept(
-        self, start_path: str = "/", wait_time_ms: int = 3000
+        self,
+        start_path: str = "/",
+        wait_time_ms: int = 3000,
+        on_intercept: Optional[Callable[[Dict[str, Any]], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Navigates to the application using a headless Chromium browser,
 
@@ -92,6 +108,8 @@ class ReconAgent:
                 page = browser.new_page()
 
                 def handle_response(response):
+                    if should_stop and should_stop():
+                        return
                     url = response.url
                     # Filter for target host traffic
                     if self.base_url in url:
@@ -100,13 +118,19 @@ class ReconAgent:
                             sample = ""
                             if any(t in content_type.lower() for t in ["json", "html", "text"]):
                                 sample = response.text()[:250]
-                            intercepted.append({
+                            item = {
                                 "url": url,
                                 "status": response.status,
                                 "method": response.request.method,
                                 "content_type": content_type,
                                 "sample_body": sample,
-                            })
+                            }
+                            intercepted.append(item)
+                            if on_intercept:
+                                try:
+                                    on_intercept(item)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
 
